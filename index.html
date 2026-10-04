@@ -1,0 +1,208 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kyutai Live Transcription</title>
+<style>
+  :root { --bg:#0f1115; --panel:#181b22; --ink:#e8eaf0; --muted:#8b92a5; --accent:#7cc4ff; --rec:#ff5d6c; }
+  * { box-sizing:border-box; }
+  body { margin:0; min-height:100vh; background:var(--bg); color:var(--ink);
+         font:16px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif;
+         display:flex; flex-direction:column; align-items:center; padding:32px 16px; gap:20px; }
+  h1 { font-size:20px; font-weight:600; margin:0; }
+  .sub { color:var(--muted); font-size:14px; margin-top:-12px; }
+  .controls { display:flex; gap:12px; align-items:center; flex-wrap:wrap; justify-content:center; }
+  button { font:inherit; border:0; border-radius:999px; padding:12px 24px; cursor:pointer;
+           background:var(--accent); color:#0b1220; font-weight:600; min-width:150px; }
+  button.rec { background:var(--rec); color:#fff; }
+  button.ghost { background:transparent; color:var(--muted); border:1px solid #2a2f3a; min-width:0; }
+  button:disabled { opacity:.5; cursor:default; }
+  #status { color:var(--muted); font-size:14px; min-height:21px; }
+  #meter { width:120px; height:6px; background:#2a2f3a; border-radius:3px; overflow:hidden; }
+  #meter > div { height:100%; width:0; background:var(--accent); transition:width 60ms linear; }
+  #out { width:100%; max-width:760px; min-height:240px; max-height:60vh; overflow-y:auto;
+         background:var(--panel); border-radius:12px; padding:20px 24px; font-size:18px; }
+  #out p { margin:0 0 12px; }
+  #out p.live::after { content:"▍"; color:var(--accent); animation:blink 1s steps(1) infinite; }
+  #out .placeholder { color:var(--muted); }
+  @keyframes blink { 50% { opacity:0; } }
+</style>
+</head>
+<body>
+  <h1>Kyutai streaming speech-to-text</h1>
+  <div class="sub">kyutai/stt-1b-en_fr on a Chalk GPU scaling group · English &amp; French</div>
+  <div class="controls">
+    <button id="btn">Start talking</button>
+    <div id="meter"><div></div></div>
+    <button id="clear" class="ghost">Clear</button>
+  </div>
+  <div id="status"></div>
+  <div id="out"><p class="placeholder">Press “Start talking” and speak. Words appear about half a second behind you.</p></div>
+
+<script>
+const TARGET_RATE = 24000;      // Mimi's sample rate
+const SEND_SAMPLES = 1920;      // one 80 ms model frame per WebSocket message
+
+// Runs on the audio thread: downmixes, resamples the mic to 24 kHz, and posts Int16 chunks.
+const WORKLET = `
+class Pcm24k extends AudioWorkletProcessor {
+  constructor() {
+    super();
+    this.ratio = sampleRate / ${TARGET_RATE};
+    this.pos = 0;              // fractional read position into the carried input
+    this.carry = new Float32Array(0);
+    this.out = new Int16Array(${SEND_SAMPLES});
+    this.n = 0;
+  }
+  process(inputs) {
+    const ch = inputs[0];
+    if (!ch || !ch[0]) return true;
+    const len = ch[0].length;
+    const buf = new Float32Array(this.carry.length + len);
+    buf.set(this.carry);
+    for (let i = 0; i < len; i++) {
+      let s = 0;
+      for (let c = 0; c < ch.length; c++) s += ch[c][i];
+      buf[this.carry.length + i] = s / ch.length;
+    }
+    let peak = 0;
+    while (this.pos + 1 < buf.length) {
+      const i = Math.floor(this.pos), f = this.pos - i;
+      const v = Math.max(-1, Math.min(1, buf[i] * (1 - f) + buf[i + 1] * f));
+      peak = Math.max(peak, Math.abs(v));
+      this.out[this.n++] = v < 0 ? v * 0x8000 : v * 0x7fff;
+      if (this.n === this.out.length) {
+        this.port.postMessage(this.out.buffer.slice(0));
+        this.n = 0;
+      }
+      this.pos += this.ratio;
+    }
+    const keep = Math.floor(this.pos);
+    this.carry = buf.slice(keep);
+    this.pos -= keep;
+    this.port.postMessage({ peak });
+    return true;
+  }
+}
+registerProcessor("pcm-24k", Pcm24k);
+`;
+
+const btn = document.getElementById("btn");
+const statusEl = document.getElementById("status");
+const out = document.getElementById("out");
+const meter = document.querySelector("#meter > div");
+let session = null;   // { ws, ctx, stream, node }
+let para = null;      // the <p> currently receiving words
+
+function setStatus(s) { statusEl.textContent = s; }
+
+function newParagraph() {
+  if (para) para.classList.remove("live");
+  out.querySelector(".placeholder")?.remove();
+  para = document.createElement("p");
+  para.className = "live";
+  out.appendChild(para);
+}
+
+function addWord(text) {
+  if (!para) newParagraph();
+  // The first piece of a paragraph carries the word-boundary space; drop it.
+  para.textContent += para.textContent ? text : text.trimStart();
+  out.scrollTop = out.scrollHeight;
+}
+
+function wsUrl() {
+  const u = new URL("ws", location.href);
+  u.protocol = location.protocol === "https:" ? "wss:" : "ws:";
+  return u.toString();
+}
+
+async function start() {
+  btn.disabled = true;
+  setStatus("Requesting microphone…");
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true },
+    });
+  } catch (e) {
+    setStatus("Microphone unavailable: " + e.message);
+    btn.disabled = false;
+    return;
+  }
+
+  setStatus("Connecting to the GPU…");
+  const ws = new WebSocket(wsUrl());
+  ws.binaryType = "arraybuffer";
+  const ctx = new AudioContext();
+  await ctx.audioWorklet.addModule(URL.createObjectURL(new Blob([WORKLET], { type: "text/javascript" })));
+  const src = ctx.createMediaStreamSource(stream);
+  const node = new AudioWorkletNode(ctx, "pcm-24k");
+  // The worklet writes no output, so this plays silence; it keeps the graph pulling audio.
+  node.connect(ctx.destination);
+  session = { ws, ctx, stream, node, ready: false };
+
+  node.port.onmessage = (ev) => {
+    if (ev.data instanceof ArrayBuffer) {
+      if (session?.ready && ws.readyState === WebSocket.OPEN) ws.send(ev.data);
+    } else {
+      meter.style.width = Math.min(100, ev.data.peak * 140) + "%";
+    }
+  };
+
+  ws.onmessage = (ev) => {
+    const msg = JSON.parse(ev.data);
+    if (msg.type === "ready") {
+      session.ready = true;
+      src.connect(node);
+      newParagraph();
+      btn.textContent = "Stop";
+      btn.classList.add("rec");
+      btn.disabled = false;
+      setStatus("Listening");
+    } else if (msg.type === "busy") {
+      setStatus("Someone else is using the model right now. Try again in a moment.");
+    } else if (msg.type === "word") {
+      addWord(msg.text);
+    } else if (msg.type === "end_of_turn") {
+      if (para && para.textContent) newParagraph();
+    } else if (msg.type === "done") {
+      setStatus("Done");
+    }
+  };
+  ws.onclose = () => teardown();
+  ws.onerror = () => setStatus("Connection error");
+}
+
+function stop() {
+  if (!session) return;
+  btn.disabled = true;
+  setStatus("Finishing the last words…");
+  session.node.disconnect();
+  session.stream.getTracks().forEach((t) => t.stop());
+  meter.style.width = "0";
+  // The server flushes the model's delay with silence, sends "done", then closes.
+  if (session.ws.readyState === WebSocket.OPEN) session.ws.send(JSON.stringify({ type: "end" }));
+  else teardown();
+}
+
+function teardown() {
+  if (!session) return;
+  const s = session;
+  session = null;
+  s.stream.getTracks().forEach((t) => t.stop());
+  s.ctx.close();
+  if (para) { para.classList.remove("live"); if (!para.textContent) para.remove(); para = null; }
+  meter.style.width = "0";
+  btn.textContent = "Start talking";
+  btn.classList.remove("rec");
+  btn.disabled = false;
+  if (statusEl.textContent !== "Done" && !statusEl.textContent.startsWith("Someone")) setStatus("Disconnected");
+}
+
+btn.onclick = () => (session ? stop() : start());
+document.getElementById("clear").onclick = () => { out.innerHTML = ""; para = null; if (session?.ready) newParagraph(); };
+</script>
+</body>
+</html>

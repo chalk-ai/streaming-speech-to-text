@@ -5,36 +5,52 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Kyutai Live Transcription</title>
 <style>
-  :root { --bg:#0f1115; --panel:#181b22; --ink:#e8eaf0; --muted:#8b92a5; --accent:#7cc4ff; --rec:#ff5d6c; }
+  /* Chalk marketing palette: green-1 ground, chartreuse primary, mint accents. */
+  :root { --bg:#224A41; --panel:#1C3B34; --line:#32645B; --ink:#EFF5F3; --muted:#B9CFC7;
+          --accent:#BBD96D; --mint:#70CD96; --rec:#F8947F; }
   * { box-sizing:border-box; }
   body { margin:0; min-height:100vh; background:var(--bg); color:var(--ink);
          font:16px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif;
          display:flex; flex-direction:column; align-items:center; padding:32px 16px; gap:20px; }
-  h1 { font-size:20px; font-weight:600; margin:0; }
+  html.embed body { padding:28px 24px; min-height:0; }
+  html.embed h1, html.embed .sub { display:none; }
+  h1 { font-size:22px; font-weight:500; margin:0; letter-spacing:-0.3px; }
   .sub { color:var(--muted); font-size:14px; margin-top:-12px; }
   .controls { display:flex; gap:12px; align-items:center; flex-wrap:wrap; justify-content:center; }
-  button { font:inherit; border:0; border-radius:999px; padding:12px 24px; cursor:pointer;
-           background:var(--accent); color:#0b1220; font-weight:600; min-width:150px; }
-  button.rec { background:var(--rec); color:#fff; }
-  button.ghost { background:transparent; color:var(--muted); border:1px solid #2a2f3a; min-width:0; }
+  button { font:13px/15px ui-monospace,"SFMono-Regular",Menlo,monospace; text-transform:uppercase;
+           letter-spacing:.06em; border:1px solid var(--accent); border-radius:20px; padding:12px 22px;
+           cursor:pointer; background:var(--accent); color:var(--bg); min-width:170px;
+           transition:background .15s,color .15s; }
+  button:hover { background:transparent; color:var(--accent); }
+  button.rec { background:var(--rec); border-color:var(--rec); color:var(--bg); }
+  button.rec:hover { background:transparent; color:var(--rec); }
+  button.ghost { background:transparent; color:var(--muted); border-color:var(--line); min-width:0; }
+  button.ghost:hover { color:var(--ink); border-color:var(--muted); }
   button:disabled { opacity:.5; cursor:default; }
-  #status { color:var(--muted); font-size:14px; min-height:21px; }
-  #meter { width:120px; height:6px; background:#2a2f3a; border-radius:3px; overflow:hidden; }
-  #meter > div { height:100%; width:0; background:var(--accent); transition:width 60ms linear; }
+  #status { color:var(--muted); font:12px/18px ui-monospace,Menlo,monospace; text-transform:uppercase;
+            letter-spacing:.06em; min-height:18px; }
+  /* A tiny live waveform: one bar per recent audio chunk. */
+  #meter { display:flex; align-items:center; gap:3px; height:32px; width:140px; }
+  #meter > i { flex:1; height:2px; border-radius:1px; background:var(--mint); opacity:.35;
+               transition:height 80ms linear, opacity 80ms linear; }
   #out { width:100%; max-width:760px; min-height:240px; max-height:60vh; overflow-y:auto;
-         background:var(--panel); border-radius:12px; padding:20px 24px; font-size:18px; }
+         background:var(--panel); border:1px solid var(--line); border-radius:4px;
+         padding:20px 24px; font-size:18px; }
   #out p { margin:0 0 12px; }
-  #out p.live::after { content:"▍"; color:var(--accent); animation:blink 1s steps(1) infinite; }
+  #out p.live::after { content:"▍"; color:var(--mint); animation:blink 1s steps(1) infinite; }
   #out .placeholder { color:var(--muted); }
   @keyframes blink { 50% { opacity:0; } }
 </style>
+<script>
+  if (new URLSearchParams(location.search).has("embed")) document.documentElement.classList.add("embed");
+</script>
 </head>
 <body>
   <h1>Kyutai streaming speech-to-text</h1>
   <div class="sub">kyutai/stt-1b-en_fr on a Chalk GPU scaling group · English &amp; French</div>
   <div class="controls">
     <button id="btn">Start talking</button>
-    <div id="meter"><div></div></div>
+    <div id="meter" aria-hidden="true"></div>
     <button id="clear" class="ghost">Clear</button>
   </div>
   <div id="status"></div>
@@ -91,7 +107,28 @@ registerProcessor("pcm-24k", Pcm24k);
 const btn = document.getElementById("btn");
 const statusEl = document.getElementById("status");
 const out = document.getElementById("out");
-const meter = document.querySelector("#meter > div");
+const meterEl = document.getElementById("meter");
+const METER_BARS = 24;
+for (let i = 0; i < METER_BARS; i++) meterEl.appendChild(document.createElement("i"));
+const meterBars = Array.from(meterEl.children);
+const peaks = new Array(METER_BARS).fill(0);
+function pushPeak(p) {
+  peaks.shift();
+  peaks.push(p);
+  meterBars.forEach((bar, i) => {
+    const v = Math.min(1, peaks[i] * 2.5);
+    bar.style.height = Math.max(2, v * 32) + "px";
+    bar.style.opacity = 0.35 + 0.65 * v;
+  });
+}
+// The worklet reports a peak every ~3 ms; fold them into one bar per 50 ms.
+let pendingPeak = 0, lastBarAt = 0;
+function notePeak(p) {
+  pendingPeak = Math.max(pendingPeak, p);
+  const now = performance.now();
+  if (now - lastBarAt >= 50) { pushPeak(pendingPeak); pendingPeak = 0; lastBarAt = now; }
+}
+function resetMeter() { peaks.fill(0); pendingPeak = 0; pushPeak(0); }
 let session = null;   // { ws, ctx, stream, node }
 let para = null;      // the <p> currently receiving words
 
@@ -147,7 +184,7 @@ async function start() {
     if (ev.data instanceof ArrayBuffer) {
       if (session?.ready && ws.readyState === WebSocket.OPEN) ws.send(ev.data);
     } else {
-      meter.style.width = Math.min(100, ev.data.peak * 140) + "%";
+      notePeak(ev.data.peak);
     }
   };
 
@@ -181,7 +218,7 @@ function stop() {
   setStatus("Finishing the last words…");
   session.node.disconnect();
   session.stream.getTracks().forEach((t) => t.stop());
-  meter.style.width = "0";
+  resetMeter();
   // The server flushes the model's delay with silence, sends "done", then closes.
   if (session.ws.readyState === WebSocket.OPEN) session.ws.send(JSON.stringify({ type: "end" }));
   else teardown();
@@ -194,7 +231,7 @@ function teardown() {
   s.stream.getTracks().forEach((t) => t.stop());
   s.ctx.close();
   if (para) { para.classList.remove("live"); if (!para.textContent) para.remove(); para = null; }
-  meter.style.width = "0";
+  resetMeter();
   btn.textContent = "Start talking";
   btn.classList.remove("rec");
   btn.disabled = false;

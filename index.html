@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Kyutai Live Transcription</title>
+<title>Streaming speech-to-text</title>
 <style>
   /* Chalk marketing palette: green-1 ground, chartreuse primary, mint accents. */
   :root { --bg:#224A41; --panel:#1C3B34; --line:#32645B; --ink:#EFF5F3; --muted:#B9CFC7;
@@ -46,15 +46,15 @@
 </script>
 </head>
 <body>
-  <h1>Kyutai streaming speech-to-text</h1>
-  <div class="sub">kyutai/stt-1b-en_fr on a Chalk GPU scaling group · English &amp; French</div>
+  <h1>Streaming speech-to-text</h1>
+  <div class="sub">Live transcription in English and French, powered by Chalk.</div>
   <div class="controls">
     <button id="btn">Start talking</button>
     <div id="meter" aria-hidden="true"></div>
     <button id="clear" class="ghost">Clear</button>
   </div>
   <div id="status"></div>
-  <div id="out"><p class="placeholder">Press “Start talking” and speak. Words appear about half a second behind you.</p></div>
+  <div id="out"><p class="placeholder">Press “Start talking” to begin. Your transcript will appear here.</p></div>
 
 <script>
 const TARGET_RATE = 24000;      // Mimi's sample rate

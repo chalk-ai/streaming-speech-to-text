@@ -22,11 +22,10 @@ browser mic ──AudioWorklet──▶ 24 kHz int16 PCM ──WebSocket──�
 ## Run it
 
 You need [`uv`](https://docs.astral.sh/uv/) and a Chalk environment that can schedule GPU workloads.
-Credentials come from `chalk config` in the current directory. You can also set `CHALK_API_SERVER`,
-`CHALK_CLIENT_ID`, `CHALK_CLIENT_SECRET` and `CHALK_ENVIRONMENT_ID` yourself.
+Credentials come from your existing `chalk login`.
 
 ```bash
-./deploy.py --gpu nvidia-l4
+./deploy.py
 ```
 
 The first deploy builds a multi-gigabyte image, then waits for a GPU node, so expect 10–20 minutes.
@@ -76,3 +75,10 @@ last words are flushed out before it sends `done`.
 
 The code is Apache-2.0. The `kyutai/stt-1b-en_fr` weights are released by Kyutai under
 CC-BY 4.0, and the [moshi](https://github.com/kyutai-labs/moshi) Python package is MIT.
+
+## Local authentication
+
+The SDK reads credentials, API host, and the selected environment from your existing
+`chalk login` in `~/.chalk.yml`, including project-scoped and default logins.
+For unattended runs, `CHALK_CLIENT_ID` and `CHALK_CLIENT_SECRET` remain supported.
+The examples use the current environment selected by your Chalk login.
